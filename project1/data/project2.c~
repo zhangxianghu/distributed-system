@@ -1,0 +1,422 @@
+
+#include "stdio.h"
+#include "stdlib.h"
+
+#include <time.h>
+#include "string.h"
+#include "mpi.h"
+
+//Clock variables
+clock_t begin, end;				
+double time_spent;
+
+int total_rounds;									//number of rounds
+int partition;								//number of partitions
+int len;									//number of lines in file
+int largest;								//largest node ID
+
+//Storage Arrays
+int *degree;
+float *credit;
+int *pID;
+int *edges;
+
+//MPI parameters
+int world_size;
+int rank;
+
+//file reading globals
+long int fileSize;
+long int fileSize_Partition;
+
+char * buffer;
+char * buffer_partition;
+
+char * partitionFileName;
+char * graphFileName;
+
+void initialization(char * fileName){
+	FILE *fp;
+
+	fp = fopen(fileName, "r");
+	if(fp == NULL){
+		perror("Error Opening File Graph\n");
+		//return(-1);
+		exit(0);
+	}
+
+	char number[1024];
+	int i = 0;
+	int n = 0;
+
+	largest = 0;
+	len = 0;
+	fseek(fp, 0, SEEK_END);
+	fileSize = ftell(fp);
+
+	buffer = (char *)malloc(sizeof(char)* fileSize+1);
+
+	long int count = 0;
+	fseek(fp, 0, SEEK_SET);
+	fread(buffer, 1, fileSize, fp);
+	while(count != fileSize){
+		if((char)buffer[count] == ' ' || (char)buffer[count] == '\t' || (char)buffer[count] == '\n'){
+			number[i] = '\0';
+			i = 0;
+
+			n = atoi(number);
+			if(n == 0){
+			//	count++;
+				continue;
+			}
+
+			if(n > largest){
+				largest = n;
+			}
+
+			if(buffer[count] == '\n'){
+				len++;
+			}
+			//i++;
+			count++;
+			continue;
+		}
+		number[i] = (char)buffer[count];
+		i++;
+		count++;
+	}
+
+	fseek(fp, 0, SEEK_SET);
+
+	degree = (int*)calloc(largest+1, sizeof(int));
+    credit = (float *)calloc((total_rounds+1)*largest +1, sizeof(float));
+	pID = (int *)calloc(largest+1, sizeof(int));
+	edges = (int *)calloc(len*2, sizeof(int));
+
+ 	MPI_Init(NULL, NULL);
+    MPI_Comm_size(MPI_COMM_WORLD, &world_size);
+    if((world_size !=2) && (world_size != 4)){
+    	MPI_Abort(MPI_COMM_WORLD, 1);
+    	exit(0);
+    }
+    
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    
+    fclose(fp);
+
+}
+
+
+//read file, parse input and store data into vector
+void readFile_Graph(char * fileName){
+
+	char number[1024];
+	int i = 0;
+	int n = 0;
+	int e1 = 0;
+	//int round = 5;
+	int count = 0;
+
+	while(count != fileSize){
+		if((char)buffer[count] == ' ' || (char)buffer[count] == '\t' || (char)buffer[count] == '\n'){
+			number[i] = '\0';
+			i = 0;
+
+			n = atoi(number);
+			if(n == 0){
+				continue;
+			}
+
+			edges[e1] = n;
+			e1++;
+
+			count++;
+			continue;
+		}
+		number[i] = (char)buffer[count];
+		i++;
+		count++;
+
+	}
+ 	free(buffer);
+
+}
+
+//read partition file and store data.
+void readFile_Partition(char * fileName){
+	FILE * fp_Partition;
+	fp_Partition = fopen(fileName, "r");
+	if(fp_Partition == NULL){
+		perror("Error Opening File Partition\n");
+		//return(-1);
+		exit(0);
+	}
+	fseek(fp_Partition, 0, SEEK_END);
+	long int fileSize_Partition = ftell(fp_Partition);
+	buffer_partition = (char *)malloc(sizeof(char)* fileSize_Partition+1);
+	long int count = 0;
+	fseek(fp_Partition, 0, SEEK_SET);
+	fread(buffer_partition, 1, fileSize_Partition, fp_Partition);
+	
+	int num_type =0; 			//type of number: 0ID  1degree  2partition
+	int degree_id = 0;
+	char number[1024];			//store bits to convert to number
+	int i = 0;					//counter for number buffer
+	int n = 0;					//number retrived after parse
+	while(count != fileSize_Partition){
+		if((char)buffer_partition[count] == ' ' || (char)buffer_partition[count] == '\t' || (char)buffer_partition[count] == '\n'){
+			number[i] = '\0';
+			i = 0;
+
+			n = atoi(number);
+			if(n == 0){
+				//continue;
+			}
+			if(num_type == 0){
+				degree_id = n;
+				num_type = 1;
+			}else if(num_type == 1){
+				degree[degree_id] = n;
+				num_type = 2;
+			}else{
+				pID[degree_id] = n;
+				num_type = 0;
+			}
+
+			count++;
+			continue;
+		}
+		number[i] = (char)buffer_partition[count];
+		i++;
+		count++;
+
+	}
+
+	fclose(fp_Partition);
+	free(buffer_partition);
+
+}
+
+
+int mpi_send_credit(int round_number){
+	float *send_credit;
+	int init_size = largest;
+
+	send_credit = (float*)calloc(init_size, sizeof(float));
+
+	int i = 0;
+	int j = 0;
+	for(i=1;i<=largest;i++){
+		if(credit[round_number*largest+i]!=(float)0){
+			send_credit[j] = credit[round_number*largest+i];
+			j++;
+		}
+	}
+	MPI_Request request[partition];
+	MPI_Status status[partition];
+	int m = 0;
+	int n = 0;
+	for(m=0;m<partition;m++){
+		if(rank==m){
+			for(n=0;n<partition;n++){
+				if(n!=m){
+					MPI_Isend(send_credit, init_size, MPI_FLOAT, n, round_number, MPI_COMM_WORLD, &request[m]);
+					MPI_Wait(&request[m], &status[m]);
+				}
+			}
+		}else{
+			MPI_Status recv_status[partition];
+			MPI_Request recv_request[partition];
+			float *recv_credit;
+			int count;
+			MPI_Probe(m, round_number, MPI_COMM_WORLD, &recv_status[m]);
+			MPI_Get_count(&recv_status[m], MPI_FLOAT, &count);
+			recv_credit = (float*) malloc(sizeof(float)*count);
+
+			MPI_Irecv(recv_credit, count, MPI_FLOAT, m, round_number, MPI_COMM_WORLD, &recv_request[m]);
+			MPI_Wait(&recv_request[m], &recv_status[m]);
+
+			//store them
+			int x=0;
+			int y = 0;
+			for(x=1;x<=largest;x++){
+				if(pID[x]==m){
+					credit[round_number*largest+x] = recv_credit[y];
+					y++;
+				}
+			}
+
+		}
+	}
+	return 0;
+}
+void writePartition(FILE * fp, int p){
+	int i = 0;
+	int j = 0;
+	for(i = 1; i<=largest; i++){
+		if(degree[i] != 0){
+			if(p == pID[i]){
+				fprintf(fp, "%i\t%i\t", i, degree[i]);
+                fprintf(fp,"1\t");
+				for(j = 1; j<=total_rounds; j++){
+					fprintf(fp, "%f\t", credit[j*largest + i]);
+				}
+				fprintf(fp, "\n");
+			}
+		}
+	}
+}
+
+void writeFile_partition(){
+	FILE *outFile;
+	char outFileName[] = "output_p.txt\0";
+	//int tmp = 7;
+	//MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+	int i = 0;
+	begin = clock();
+	for(i = 0; i< partition; i++){
+
+		if(i == rank){
+			outFileName[7] = i + '0';
+
+			outFile = fopen(outFileName, "w");
+			if(outFile == NULL){
+				perror("Error Opening File\n");
+				exit(0);
+			}
+			writePartition(outFile, i);
+			fclose(outFile);
+		}
+	}
+	end = clock();
+	time_spent = (double)(end - begin)/ CLOCKS_PER_SEC;
+	printf("time to write the output files, partition %i = %.2fsec\n", rank, time_spent);
+
+}
+
+void calculate_round_zero(){
+	begin = clock();
+
+	int tnode1 = 0;
+	int tnode2 = 1;
+	int i =0;
+	for(i=1; i<=len; i++){
+		int first, second;
+		first = edges[tnode1];
+		second = edges[tnode2];
+		if((pID[first]==rank)&&(pID[second]==rank)){
+			credit[first]=1;
+			credit[second]=1;
+		}
+		else if((pID[first]==rank)&&(pID[second]!=rank)){
+			credit[first]=1;
+		}else if((pID[first]!=rank)&&(pID[second]==rank)){
+			credit[second]=1;
+		}
+		tnode1 +=2;
+		tnode2 +=2;
+
+	}
+
+	//end = clock();
+	//time_spent = (double)(end - begin)/ CLOCKS_PER_SEC;
+	//zero round
+	//printf("time for round 1 , partition %i = %.2fsec\n",rank, time_spent);
+}
+
+
+
+void calculate_round(int r){
+	calculate_round_zero();
+	mpi_send_credit(0);
+	int tnode1 = 0;
+	int tnode2 = 1;
+	int i = 0;
+	int j = 0;
+	for(i=1;i<=r;i++){
+		begin = clock();
+		tnode1 = 0;
+		tnode2 = 1;
+	
+		for(j=1;j<=len;j++){
+
+			int first,second;
+			first= edges[tnode1];
+			second= edges[tnode2];
+
+			if((pID[first]==rank)&&(pID[second]==rank)){
+				credit[largest*i+first]+=credit[largest*(i-1)+second]/degree[second];
+				credit[largest*i+second]+=credit[largest*(i-1)+first]/degree[first];
+			
+			}else if((pID[first]==rank)&&(pID[second]!=rank)){
+				credit[largest*i+first]+=credit[largest*(i-1)+second]/degree[second];
+			
+			}else if((pID[first]!=rank)&&(pID[second]==rank)){
+				credit[largest*i+second]+=credit[largest*(i-1)+first]/degree[first];
+			
+			}
+		
+			tnode1 +=2;
+			tnode2 +=2;
+		}
+		//calculate the time for calculation.
+		end = clock();
+		time_spent = (double)(end - begin)/ CLOCKS_PER_SEC;
+		
+		printf("time for round %i, partition %i = %.2fsec\n",(i),rank, time_spent);
+		//write();
+		mpi_send_credit(i);
+		end = clock();
+		time_spent = (double)(end - begin)/ CLOCKS_PER_SEC;
+		if(rank == 0){
+			printf("total time for round %i: %.2fsec\n",(i), time_spent);
+		}
+
+	}
+	writeFile_partition();
+}
+
+
+int main(int argc, char ** argv){
+	//check parameters
+    if(argc<5){
+    	perror("To Run:'programName graphFile partitionFile rounds'\nExiting");
+		exit(-1);
+    }
+
+    total_rounds=atoi(argv[3]);
+	if(total_rounds<1){
+		perror("The round number should be bigger than 0\n Exiting");
+		exit(0);
+	}
+
+    partition=atoi(argv[4]);
+	if(partition<2){
+		perror("The partition number should be bigger than 1\n Exiting");
+		exit(0);
+	}
+
+	begin = clock();
+	initialization(argv[1]);
+
+	readFile_Graph(argv[1]); //in_filename
+
+	readFile_Partition(argv[2]);
+
+	end = clock();
+
+	time_spent = (double)(end - begin)/ CLOCKS_PER_SEC;
+	//if(rank == 0){
+	printf("time to read input files, partition %i = %.2fsec\n",rank, time_spent);
+	//}
+
+	calculate_round(total_rounds);
+	printf("before free");
+	free(degree);
+	free(credit);
+	free(edges);
+    printf("free done");
+	MPI_Finalize();
+    printf("finally");
+	return 0;
+}
